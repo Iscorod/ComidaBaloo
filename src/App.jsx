@@ -1,11 +1,11 @@
-import { useState, useEffect } from "react";
-import { db, ref, push, onValue, remove } from "./firebase";
+import { useState, useEffect, useCallback } from "react";
+import { isConfigured, loadEntries, saveEntries } from "./github";
 
 /* ── Config ── */
 const FOOD_ITEMS = [
-  { id: "pienso", label: "Pienso", emoji: "🥣", color: "#A67C52", presets: [5, 10, 20, 30, 40, 50], formatVal: v => `${v}g`, formatShort: v => `${v}g`, presetLabel: v => `+${v}g` },
-  { id: "pure", label: "Puré", emoji: "🥫", color: "#D4763A", presets: [1, 2, 3, 4, 5, 6], formatVal: v => v === 1 ? "1 cuchara" : `${v} cucharas`, formatShort: v => `${v} cuch.`, presetLabel: v => `+${v}` },
-  { id: "caballo", label: "Caballo", emoji: "🥩", color: "#C0392B", presets: [1, 2, 3, 4, 5, 6], formatVal: v => v === 1 ? "1 puñado" : `${v} puñados`, formatShort: v => `${v} puñ.`, presetLabel: v => `+${v}` },
+  { id: "pienso", label: "Pienso", emoji: "🥣", color: "#A67C52", presets: [5, 10, 20, 30, 40, 50], fmtVal: v => `${v}g`, fmtShort: v => `${v}g`, fmtBtn: v => `+${v}g` },
+  { id: "pure", label: "Puré", emoji: "🥫", color: "#D4763A", presets: [1, 2, 3, 4, 5, 6], fmtVal: v => v === 1 ? "1 cuchara" : `${v} cucharas`, fmtShort: v => `${v} cuch.`, fmtBtn: v => `+${v}` },
+  { id: "caballo", label: "Caballo", emoji: "🥩", color: "#C0392B", presets: [1, 2, 3, 4, 5, 6], fmtVal: v => v === 1 ? "1 puñado" : `${v} puñados`, fmtShort: v => `${v} puñ.`, fmtBtn: v => `+${v}` },
 ];
 
 const TOGGLE_MEDS = [
@@ -41,40 +41,53 @@ const EMPTY = { pienso: 0, pure: 0, caballo: 0, micofenolato: false, promax: fal
 export default function App() {
   const [entries, setEntries] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
   const [view, setView] = useState("log");
   const [cur, setCur] = useState({ ...EMPTY });
   const [openFood, setOpenFood] = useState(null);
   const [toast, setToast] = useState("");
   const [delId, setDelId] = useState(null);
+  const [lastSync, setLastSync] = useState(null);
 
-  /* Firebase realtime listener */
-  useEffect(() => {
+  /* Load on mount */
+  const refresh = useCallback(async () => {
+    if (!isConfigured) { setError("SETUP"); setLoading(false); return; }
     try {
-      const entriesRef = ref(db, "entries");
-      const unsub = onValue(entriesRef, (snap) => {
-        const data = snap.val();
-        if (data) {
-          const list = Object.entries(data)
-            .map(([key, val]) => ({ ...val, _fbKey: key }))
-            .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
-          setEntries(list);
-        } else {
-          setEntries([]);
-        }
-        setLoading(false);
-        setError(null);
-      }, (err) => {
-        console.error(err);
-        setError("No se pudo conectar a la base de datos. Revisa la configuración de Firebase.");
-        setLoading(false);
-      });
-      return () => unsub();
+      const data = await loadEntries();
+      setEntries(data);
+      setError(null);
+      setLastSync(new Date());
     } catch (e) {
-      setError("Error de configuración de Firebase. Revisa src/firebase.js");
-      setLoading(false);
+      setError("No se pudo conectar a GitHub. Revisa el token y el repositorio.");
     }
+    setLoading(false);
   }, []);
+
+  useEffect(() => { refresh(); }, [refresh]);
+
+  /* Auto-refresh every 30s */
+  useEffect(() => {
+    if (!isConfigured) return;
+    const id = setInterval(refresh, 30000);
+    return () => clearInterval(id);
+  }, [refresh]);
+
+  const persistAndRefresh = async (newEntries) => {
+    setSaving(true);
+    try {
+      await saveEntries(newEntries);
+      setEntries(newEntries);
+      setLastSync(new Date());
+      setSaving(false);
+      return true;
+    } catch (e) {
+      setSaving(false);
+      setToast("Error al guardar ✕");
+      setTimeout(() => setToast(""), 3000);
+      return false;
+    }
+  };
 
   const addFood = (id, amt) => setCur(p => ({ ...p, [id]: p[id] + amt }));
   const resetFood = (id) => setCur(p => ({ ...p, [id]: 0 }));
@@ -86,22 +99,21 @@ export default function App() {
     const hasFood = cur.pienso > 0 || cur.pure > 0 || cur.caballo > 0;
     const hasMeds = cur.micofenolato || cur.promax || cur.corticoides > 0;
     if (!hasFood && !hasMeds) return;
-    const entry = { ...cur, timestamp: new Date().toISOString() };
-    try {
-      await push(ref(db, "entries"), entry);
+    const entry = { ...cur, timestamp: new Date().toISOString(), id: Date.now() };
+    const newEntries = [entry, ...entries];
+    const ok = await persistAndRefresh(newEntries);
+    if (ok) {
       setCur({ ...EMPTY });
       setOpenFood(null);
       setToast("Toma registrada ✓");
       setTimeout(() => setToast(""), 2000);
-    } catch {
-      setToast("Error al guardar");
-      setTimeout(() => setToast(""), 3000);
     }
   };
 
-  const del = async (fbKey) => {
-    if (delId !== fbKey) { setDelId(fbKey); return; }
-    try { await remove(ref(db, `entries/${fbKey}`)); } catch {}
+  const del = async (id) => {
+    if (delId !== id) { setDelId(id); return; }
+    const newEntries = entries.filter(e => e.id !== id);
+    await persistAndRefresh(newEntries);
     setDelId(null);
   };
 
@@ -126,7 +138,35 @@ export default function App() {
 
   /* ── Render ── */
   if (loading) return <div style={S.loadScreen}><span style={{ fontSize: 48 }}>🐾</span><p style={{ color: "#999", marginTop: 12 }}>Cargando registros de Baloo...</p></div>;
-  if (error) return <div style={S.loadScreen}><span style={{ fontSize: 48 }}>⚠️</span><p style={{ color: "#C0392B", marginTop: 12, padding: "0 24px", textAlign: "center", lineHeight: 1.5 }}>{error}</p></div>;
+
+  if (error === "SETUP") return (
+    <div style={{ maxWidth: 480, margin: "0 auto", padding: "40px 24px", fontFamily: "'Inter',-apple-system,sans-serif", color: "#2D2D2D" }}>
+      <div style={{ textAlign: "center", marginBottom: 24 }}>
+        <span style={{ fontSize: 48 }}>🐾</span>
+        <h1 style={{ fontSize: 20, fontWeight: 700, marginTop: 8 }}>Registros Comida Baloo</h1>
+        <p style={{ color: "#A67C52", fontSize: 14, marginTop: 4 }}>Configuración inicial</p>
+      </div>
+      <div style={{ background: "#FFF8F0", borderRadius: 14, padding: 20, border: "1px solid #F0E6D6", lineHeight: 1.8, fontSize: 14 }}>
+        <p style={{ fontWeight: 600, marginBottom: 12 }}>Configura estas variables de entorno en Vercel:</p>
+        <div style={{ background: "#fff", borderRadius: 10, padding: 14, marginBottom: 16, fontSize: 13, fontFamily: "monospace", lineHeight: 2 }}>
+          <div><strong>VITE_GITHUB_TOKEN</strong> = tu token</div>
+          <div><strong>VITE_GITHUB_REPO</strong> = usuario/repo</div>
+          <div><strong>VITE_GITHUB_FILE</strong> = data.json</div>
+        </div>
+        <p style={{ fontWeight: 600, marginBottom: 8 }}>Pasos:</p>
+        <ol style={{ paddingLeft: 20, display: "flex", flexDirection: "column", gap: 6 }}>
+          <li>En GitHub → Settings → Developer settings → <a href="https://github.com/settings/tokens?type=beta" target="_blank" rel="noopener" style={{ color: "#A67C52" }}>Fine-grained tokens</a></li>
+          <li>Generate new token → selecciona solo tu repo → permiso <strong>Contents: Read and write</strong></li>
+          <li>Copia el token</li>
+          <li>En <a href="https://vercel.com" target="_blank" rel="noopener" style={{ color: "#A67C52" }}>Vercel</a> → tu proyecto → Settings → Environment Variables</li>
+          <li>Añade las 3 variables de arriba</li>
+          <li>Redeploy (Deployments → ⋮ → Redeploy)</li>
+        </ol>
+      </div>
+    </div>
+  );
+
+  if (error) return <div style={S.loadScreen}><span style={{ fontSize: 48 }}>⚠️</span><p style={{ color: "#C0392B", marginTop: 12, padding: "0 24px", textAlign: "center", lineHeight: 1.5 }}>{error}</p><button style={{ marginTop: 16, padding: "10px 24px", borderRadius: 10, border: "none", background: "#A67C52", color: "#fff", fontWeight: 600, cursor: "pointer" }} onClick={refresh}>Reintentar</button></div>;
 
   return (
     <>
@@ -139,8 +179,6 @@ export default function App() {
         .fi{animation:fadeIn .2s ease}
         @keyframes pop{0%{transform:scale(1)}50%{transform:scale(1.15)}100%{transform:scale(1)}}
         .pop{animation:pop .25s ease}
-        @keyframes slideUp{from{opacity:0;transform:translateY(20px)}to{opacity:1;transform:translateY(0)}}
-        .slide-up{animation:slideUp .3s ease}
       `}</style>
       <div style={S.container}>
         {/* Header */}
@@ -149,7 +187,13 @@ export default function App() {
             <span style={{ fontSize: 28 }}>🐾</span>
             <div>
               <h1 style={S.title}>Registros Comida Baloo</h1>
-              <div style={S.liveTag}>● Sincronizado</div>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 2 }}>
+                <span style={{ fontSize: 10, color: saving ? "#E17055" : "#27AE60", fontWeight: 600 }}>
+                  {saving ? "● Guardando..." : "● Sincronizado"}
+                </span>
+                {lastSync && <span style={{ fontSize: 10, color: "#BBB" }}>{fmtTime(lastSync.toISOString())}</span>}
+                <button style={{ background: "none", border: "none", fontSize: 12, color: "#A67C52", cursor: "pointer", padding: 0, fontWeight: 600 }} onClick={refresh}>↻</button>
+              </div>
             </div>
           </div>
           <div style={S.tabs}>
@@ -163,7 +207,6 @@ export default function App() {
         {/* ── LOG VIEW ── */}
         {view === "log" && (
           <main style={S.main}>
-            {/* Today strip */}
             {todayList.length > 0 && (
               <div style={S.todayBar}>
                 <span style={S.todayLabel}>Hoy</span>
@@ -176,7 +219,6 @@ export default function App() {
               </div>
             )}
 
-            {/* Food */}
             <section style={S.sec}>
               <h2 style={S.secTitle}>Alimentación</h2>
               {FOOD_ITEMS.map(f => {
@@ -187,7 +229,7 @@ export default function App() {
                     <button style={{ ...S.cardHead, borderLeft: `4px solid ${f.color}` }} onClick={() => setOpenFood(isOpen ? null : f.id)}>
                       <div style={S.row}><span style={{ fontSize: 22 }}>{f.emoji}</span><span style={S.cardName}>{f.label}</span></div>
                       <div style={S.row}>
-                        {val > 0 && <span key={val} className="pop" style={{ fontWeight: 700, fontSize: 16, color: f.color }}>{f.formatVal(val)}</span>}
+                        {val > 0 && <span key={val} className="pop" style={{ fontWeight: 700, fontSize: 16, color: f.color }}>{f.fmtVal(val)}</span>}
                         <span style={{ fontSize: 10, color: "#BBB" }}>{isOpen ? "▲" : "▼"}</span>
                       </div>
                     </button>
@@ -195,7 +237,7 @@ export default function App() {
                       <div className="fi" style={S.presetWrap}>
                         <div style={S.presetGrid}>
                           {f.presets.map(a => (
-                            <button key={a} style={S.presetBtn} onClick={() => addFood(f.id, a)}>{f.presetLabel(a)}</button>
+                            <button key={a} style={S.presetBtn} onClick={() => addFood(f.id, a)}>{f.fmtBtn(a)}</button>
                           ))}
                         </div>
                         {val > 0 && <button style={S.resetBtn} onClick={() => resetFood(f.id)}>Borrar</button>}
@@ -206,11 +248,8 @@ export default function App() {
               })}
             </section>
 
-            {/* Meds */}
             <section style={S.sec}>
               <h2 style={S.secTitle}>Medicación</h2>
-
-              {/* Toggle meds row */}
               <div style={S.medsRow}>
                 {TOGGLE_MEDS.map(m => {
                   const on = cur[m.id];
@@ -229,14 +268,8 @@ export default function App() {
                   );
                 })}
               </div>
-
-              {/* Corticoides */}
               <div style={S.cortiWrap}>
-                <div style={{
-                  ...S.cortiHeader,
-                  background: cur.corticoides > 0 ? "#00B894" : "#F5F5F5",
-                  color: cur.corticoides > 0 ? "#fff" : "#444",
-                }}>
+                <div style={{ ...S.cortiHeader, background: cur.corticoides > 0 ? "#00B894" : "#F5F5F5", color: cur.corticoides > 0 ? "#fff" : "#444" }}>
                   <span style={{ fontSize: 24 }}>💉</span>
                   <span style={{ fontSize: 13, fontWeight: 600 }}>Corticoides</span>
                   <span key={cur.corticoides} className="pop" style={{ fontSize: 18, fontWeight: 700 }}>{fmtCorti(cur.corticoides)}</span>
@@ -250,9 +283,12 @@ export default function App() {
               </div>
             </section>
 
-            {/* Save */}
-            <button style={{ ...S.saveBtn, opacity: hasAny ? 1 : 0.35 }} onClick={save} disabled={!hasAny}>
-              Registrar toma
+            <button
+              style={{ ...S.saveBtn, opacity: hasAny && !saving ? 1 : 0.35 }}
+              onClick={save}
+              disabled={!hasAny || saving}
+            >
+              {saving ? "Guardando..." : "Registrar toma"}
             </button>
             {toast && <div className="fi" style={S.toast}>{toast}</div>}
           </main>
@@ -267,7 +303,7 @@ export default function App() {
               <div key={day} style={{ marginBottom: 20 }}>
                 <h3 style={S.dayLabel}>{day}</h3>
                 {list.map(e => (
-                  <div key={e._fbKey} className="fi" style={S.histCard}>
+                  <div key={e.id} className="fi" style={S.histCard}>
                     <div style={S.histTime}>{fmtTime(e.timestamp)}</div>
                     <div style={S.histChips}>
                       {e.pienso > 0 && <span style={S.hChip}>🥣 {e.pienso}g</span>}
@@ -277,8 +313,8 @@ export default function App() {
                       {e.promax && <span style={{ ...S.hChip, background: "#E1705511", color: "#E17055" }}>🩹 Promax</span>}
                       {e.corticoides > 0 && <span style={{ ...S.hChip, background: "#00B89411", color: "#00B894" }}>💉 {fmtCorti(e.corticoides)}</span>}
                     </div>
-                    <button style={delId === e._fbKey ? S.delYes : S.delBtn} onClick={() => del(e._fbKey)}>
-                      {delId === e._fbKey ? "¿Seguro?" : "✕"}
+                    <button style={delId === e.id ? S.delYes : S.delBtn} onClick={() => del(e.id)}>
+                      {delId === e.id ? "¿Seguro?" : "✕"}
                     </button>
                   </div>
                 ))}
@@ -298,20 +334,16 @@ const S = {
   header: { background: "#fff", borderBottom: "1px solid #E8E8E4", padding: "20px 20px 0", position: "sticky", top: 0, zIndex: 10 },
   headerTop: { display: "flex", alignItems: "center", gap: 10, marginBottom: 12 },
   title: { fontSize: 18, fontWeight: 700, letterSpacing: "-0.02em", lineHeight: 1.2 },
-  liveTag: { fontSize: 10, color: "#27AE60", fontWeight: 600, marginTop: 2 },
   tabs: { display: "flex" },
   tabOff: { flex: 1, padding: "10px 0", background: "none", border: "none", borderBottom: "3px solid transparent", fontSize: 14, fontWeight: 500, color: "#999", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 6 },
   tabOn: { flex: 1, padding: "10px 0", background: "none", border: "none", borderBottom: "3px solid #A67C52", fontSize: 14, fontWeight: 600, color: "#A67C52", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 6 },
   badge: { background: "#A67C52", color: "#fff", borderRadius: 10, padding: "1px 7px", fontSize: 11, fontWeight: 600 },
   main: { padding: "16px 20px 120px" },
-
   todayBar: { display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6, padding: "10px 14px", background: "#FFF8F0", borderRadius: 12, marginBottom: 16, border: "1px solid #F0E6D6" },
   todayLabel: { fontSize: 12, fontWeight: 700, color: "#A67C52", marginRight: 4 },
   chip: { fontSize: 12, padding: "3px 8px", background: "#fff", borderRadius: 8, color: "#555", fontWeight: 500 },
-
   sec: { marginBottom: 24 },
   secTitle: { fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.08em", color: "#B0A898", marginBottom: 10 },
-
   card: { marginBottom: 8, borderRadius: 14, overflow: "hidden", background: "#fff", boxShadow: "0 1px 3px rgba(0,0,0,0.06)" },
   cardHead: { width: "100%", display: "flex", justifyContent: "space-between", alignItems: "center", padding: "14px 16px", background: "#fff", border: "none", cursor: "pointer", fontSize: 15 },
   row: { display: "flex", alignItems: "center", gap: 10 },
@@ -320,19 +352,15 @@ const S = {
   presetGrid: { display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 8 },
   presetBtn: { padding: "12px 0", borderRadius: 10, border: "none", background: "#F5F3EE", fontSize: 15, fontWeight: 600, color: "#555", cursor: "pointer" },
   resetBtn: { width: "100%", padding: "10px 0", borderRadius: 10, border: "none", background: "#FEE2E2", fontSize: 13, fontWeight: 600, color: "#C0392B", cursor: "pointer", marginTop: 8 },
-
   medsRow: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 10 },
   medBtn: { display: "flex", flexDirection: "column", alignItems: "center", gap: 4, padding: "18px 12px", borderRadius: 14, border: "none", cursor: "pointer", transition: "all 0.2s", position: "relative", width: "100%" },
   medCheck: { position: "absolute", top: 8, right: 10, fontSize: 16, fontWeight: 700 },
-
   cortiWrap: { background: "#fff", borderRadius: 14, padding: 14, boxShadow: "0 1px 3px rgba(0,0,0,0.06)" },
   cortiHeader: { display: "flex", alignItems: "center", justifyContent: "center", gap: 10, padding: "14px 12px", borderRadius: 10, marginBottom: 8, transition: "all 0.2s" },
   cortiGrid: { display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 6 },
   cortiBtn: { padding: "10px 0", borderRadius: 8, border: "none", background: "#F5F3EE", fontSize: 14, fontWeight: 600, color: "#555", cursor: "pointer" },
-
   saveBtn: { width: "100%", padding: "16px", borderRadius: 14, border: "none", background: "linear-gradient(135deg, #A67C52, #8B6540)", color: "#fff", fontSize: 16, fontWeight: 700, cursor: "pointer", marginTop: 8, transition: "opacity 0.2s" },
   toast: { textAlign: "center", marginTop: 12, color: "#27AE60", fontWeight: 600, fontSize: 14 },
-
   empty: { display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "60px 0" },
   dayLabel: { fontSize: 12, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", color: "#A67C52", marginBottom: 8, paddingBottom: 4, borderBottom: "1px solid #EEE" },
   histCard: { display: "flex", alignItems: "center", gap: 10, padding: "12px 14px", background: "#fff", borderRadius: 12, marginBottom: 6, boxShadow: "0 1px 2px rgba(0,0,0,0.04)" },
