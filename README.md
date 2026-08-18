@@ -1,7 +1,7 @@
 # 🐾 Registros Comida Baloo
 
-App de registro de alimentación y medicación para Baloo con **base de datos compartida en tiempo real** (Firebase).
-Cualquier persona con acceso puede registrar tomas y ver el historial al instante.
+App de registro de alimentación y medicación para Baloo.  
+Los datos se guardan como **JSON directamente en tu repositorio de GitHub**.
 
 ## Registro por toma
 
@@ -14,27 +14,49 @@ Cualquier persona con acceso puede registrar tomas y ver el historial al instant
 | Promax | toma | 1 (toggle) |
 | Corticoides | dosis (acumulativo) | +¼, +½, +¾, +1 |
 
-## Configuración Firebase (obligatorio)
+## Configuración
 
-1. Ve a [console.firebase.google.com](https://console.firebase.google.com)
-2. Crea un proyecto nuevo (desactiva Google Analytics si quieres)
-3. En el menú lateral → **Build → Realtime Database** → Crear base de datos
-4. Elige la región `europe-west1` (o la que prefieras)
-5. En la pestaña **Reglas**, pon esto y pulsa Publicar:
+### 1. Crear un token de GitHub
 
-```json
-{
-  "rules": {
-    ".read": true,
-    ".write": true
-  }
-}
-```
+1. Ve a [GitHub → Fine-grained tokens](https://github.com/settings/tokens?type=beta)
+2. **Generate new token**
+3. Dale un nombre (ej: `baloo-app`)
+4. En **Repository access** → selecciona **Only select repositories** → elige tu repo
+5. En **Permissions** → **Contents** → **Read and write**
+6. **Generate token** → copia el token
 
-6. Ve a **Configuración del proyecto** (⚙️) → **Tus apps** → icono Web `</>` → Registrar app
-7. Copia los datos de `firebaseConfig` en el archivo `src/firebase.js`
+### 2. Configurar variables en Vercel
+
+En [Vercel](https://vercel.com) → tu proyecto → **Settings** → **Environment Variables**, añade:
+
+| Variable | Valor | Ejemplo |
+|----------|-------|---------|
+| `VITE_GITHUB_TOKEN` | tu token | `github_pat_xxxxx` |
+| `VITE_GITHUB_REPO` | `usuario/repositorio` | `paco/registros-comida-baloo` |
+| `VITE_GITHUB_FILE` | ruta del JSON | `data.json` |
+
+### 3. Redeploy
+
+Deployments → ⋮ → **Redeploy**
+
+## Cómo funciona
+
+Cada vez que registras una toma, la app:
+1. Lee el `data.json` actual de tu repo vía la API de GitHub
+2. Añade el nuevo registro al array
+3. Hace un commit automático con el JSON actualizado
+
+Los datos se refrescan automáticamente cada 30 segundos.
 
 ## Desarrollo local
+
+Crea un archivo `.env` en la raíz:
+
+```env
+VITE_GITHUB_TOKEN=github_pat_tu_token
+VITE_GITHUB_REPO=tu_usuario/tu_repo
+VITE_GITHUB_FILE=data.json
+```
 
 ```bash
 npm install
@@ -43,9 +65,7 @@ npm run dev
 
 ## Despliegue en Vercel
 
-1. Sube el repositorio a GitHub
-2. Importa el proyecto en [vercel.com](https://vercel.com)
-3. Framework preset: **Vite**
+1. Sube el repo a GitHub
+2. Importa en Vercel → Framework: **Vite**
+3. Configura las variables de entorno
 4. Deploy
-
-Cada dispositivo que abra la URL verá los mismos registros en tiempo real.
