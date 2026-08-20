@@ -1,6 +1,16 @@
 [
   {
     "pienso": 20,
+    "pure": 2,
+    "caballo": 1,
+    "micofenolato": false,
+    "promax": false,
+    "corticoides": 0,
+    "timestamp": "2026-08-20T20:38:26.054Z",
+    "id": 1787258306055
+  },
+  {
+    "pienso": 20,
     "pure": 1,
     "caballo": 1,
     "micofenolato": false,
